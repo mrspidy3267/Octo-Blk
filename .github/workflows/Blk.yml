@@ -2,16 +2,25 @@ name: Rclone Transfer
 
 on:
   workflow_dispatch:
-
 jobs:
   transfer:
     runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5.5 hours (5 hours and 30 minutes)
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        
       - name: Setup Rclone
         uses: AnimMouse/setup-rclone@v1
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          
       - name: Run Rclone transfer
-        run: rclone move --progress --transfers 100 NewOctB2:Backup917 NovB2:Spidy112024/Backup
+        run: |
+          rclone move \
+            --progress \
+            --stats-one-line \
+            --stats 1m \
+            --transfers 100 \
+            NewOctB2:Backup917 NovB2:Spidy112024/Backup
