@@ -1,0 +1,17 @@
+name: Rclone Transfer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Rclone
+        uses: AnimMouse/setup-rclone@v1
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+      - name: Run Rclone transfer
+        run: rclone move --progress --transfers 100 NewOctB2:Backup917 NovB2:Spidy112024/Backup
