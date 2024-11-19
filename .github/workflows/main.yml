@@ -1,0 +1,121 @@
+name: Android CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Source repository to clone'
+        required: true
+        default: ''
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ github.event.inputs.repository }}
+        ref: ${{ github.event.inputs.branch }}
+        fetch-depth: 1
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Check Repository Information
+      run: |
+        echo "Building from repository: ${{ github.event.inputs.repository }}"
+        echo "Branch: ${{ github.event.inputs.branch }}"
+        ls -la
+
+    - name: Grant execute permission for gradlew
+      run: |
+        if [ -f "./gradlew" ]; then
+          chmod +x gradlew
+        else
+          echo "Gradle wrapper not found, attempting to create"
+          gradle wrapper
+        fi
+
+    - name: Generate Keystore
+      env:
+        KEYSTORE_PASSWORD: android_build_key
+      run: |
+        keytool -genkey -v -keystore release.jks -keyalg RSA \
+                -keysize 2048 -validity 10000 \
+                -alias androidbuildkey \
+                -storepass $KEYSTORE_PASSWORD \
+                -keypass $KEYSTORE_PASSWORD \
+                -dname "CN=Android Build, OU=Development, O=MrSpidy, L=Chennai, S=TN, C=India"
+
+    - name: Detect Build System
+      id: build-system
+      run: |
+        if [ -f "build.gradle" ]; then
+          echo "Gradle (Groovy) detected"
+          echo "build_file=build.gradle" >> $GITHUB_OUTPUT
+        elif [ -f "build.gradle.kts" ]; then
+          echo "Gradle (Kotlin) detected"
+          echo "build_file=build.gradle.kts" >> $GITHUB_OUTPUT
+        else
+          echo "No Gradle build file found"
+          exit 1
+        fi
+
+    - name: Update Gradle Signing Configuration
+      run: |
+        sed -i 's/signingConfigs {}/signingConfigs {\
+            release {\
+                storeFile file("release.jks")\
+                storePassword "android_build_key"\
+                keyAlias "androidbuildkey"\
+                keyPassword "android_build_key"\
+            }\
+        }/' ${{ steps.build-system.outputs.build_file }}
+        
+        sed -i 's/buildTypes {/buildTypes {\
+            release {\
+                signingConfig signingConfigs.release\
+                minifyEnabled true\
+                proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"\
+            }/' ${{ steps.build-system.outputs.build_file }}
+
+    - name: Validate Gradle wrapper
+      uses: gradle/wrapper-validation-action@v1
+
+    - name: Build Project
+      run: ./gradlew build
+
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug
+
+    - name: Upload Debug APK
+      uses: actions/upload-artifact@v3
+      with:
+        name: app-debug
+        path: |
+          **/build/outputs/apk/debug/*.apk
+          !**/*-unsigned.apk
+
+    - name: Build Release APK
+      run: ./gradlew assembleRelease
+
+    - name: Upload Release APK
+      uses: actions/upload-artifact@v3
+      with:
+        name: app-release
+        path: |
+          **/build/outputs/apk/release/*.apk
+          !**/*-unsigned.apk
+
+    - name: Collect Build Logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-logs
+        path: |
+          **/build/reports
+          **/build/outputs/logs
