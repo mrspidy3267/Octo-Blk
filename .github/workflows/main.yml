@@ -1,166 +1,138 @@
-name: Universal Android Build
+name: Build Release APK
 
 on:
   workflow_dispatch:
-    inputs:
-      repository:
-        description: 'Source repository to clone'
-        required: true
-        default: ''
-      branch:
-        description: 'Branch to checkout'
-        required: false
-        default: 'main'
+  push:
+    tags:
+      - '*'
+
+concurrency:
+  group: "release-build"
+  cancel-in-progress: true
+
+env:
+  KEYSTORE_PATH: release.keystore
+  KEYSTORE_PASSWORD: android_keystore_password
+  KEY_ALIAS: release_key_alias
+  KEY_PASSWORD: android_key_password
+  BUILD_TOOLS_VERSION: "34.0.0"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v3
-      with:
-        repository: ${{ github.event.inputs.repository }}
-        ref: ${{ github.event.inputs.branch }}
-        fetch-depth: 1
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v3
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-        cache: gradle
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/setup-gradle@v4
 
-    - name: Detect Android Project Structure
-      id: project-structure
-      run: |
-        # Find all gradle files
-        GRADLE_FILES=$(find . -name "build.gradle" -o -name "build.gradle.kts")
-        
-        # Find potential app modules
-        APP_MODULES=$(find . -name "build.gradle" -o -name "build.gradle.kts" | grep -E "/app/|/mobile/|/application/" | grep -v "buildSrc")
-        
-        # Print debug information
-        echo "All Gradle files:"
-        echo "$GRADLE_FILES"
-        echo ""
-        echo "Potential App Modules:"
-        echo "$APP_MODULES"
-        
-        # Determine primary app module
-        if [ -n "$APP_MODULES" ]; then
-          PRIMARY_MODULE=$(echo "$APP_MODULES" | head -n 1 | sed 's|^\./||' | xargs dirname)
-          echo "Primary module detected: $PRIMARY_MODULE"
-          echo "primary_module=$PRIMARY_MODULE" >> $GITHUB_OUTPUT
-        else
-          echo "No clear app module found"
-          exit 1
-        fi
+      - name: Setup Gradle
+        uses: gradle/wrapper-validation-action@v3
 
-    - name: Generate Keystore
-      env:
-        KEYSTORE_PASSWORD: android_build_key
-      run: |
-        keytool -genkey -v -keystore release.jks -keyalg RSA \
-                -keysize 2048 -validity 10000 \
-                -alias androidbuildkey \
-                -storepass $KEYSTORE_PASSWORD \
-                -keypass $KEYSTORE_PASSWORD \
-                -dname "CN=Android Build, OU=Development, O=Your Organization, L=City, S=State, C=Country"
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: 'adopt'
+          cache: gradle
 
-    - name: Prepare Build
-      working-directory: ${{ steps.project-structure.outputs.primary_module }}
-      run: |
-        # Make gradlew executable if it exists
-        if [ -f "./gradlew" ]; then
-          chmod +x gradlew
-        elif [ -f "../gradlew" ]; then
-          chmod +x ../gradlew
-        fi
+      - name: Generate Release Keystore
+        run: |
+          keytool -genkey -v \
+            -keystore ${{ env.KEYSTORE_PATH }} \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -alias ${{ env.KEY_ALIAS }} \
+            -storepass ${{ env.KEYSTORE_PASSWORD }} \
+            -keypass ${{ env.KEY_PASSWORD }} \
+            -dname "CN=Android Release, OU=Development, O=Your Organization, L=City, S=State, C=US"
 
-        # Attempt to update signing configuration
-        BUILDFILE=$(find . -maxdepth 1 \( -name "build.gradle" -o -name "build.gradle.kts" \) | head -n 1)
-        if [ -n "$BUILDFILE" ]; then
-          sed -i 's/signingConfigs {}/signingConfigs {\
-              release {\
-                  storeFile file("../../release.jks")\
-                  storePassword "android_build_key"\
-                  keyAlias "androidbuildkey"\
-                  keyPassword "android_build_key"\
-              }\
-          }/' "$BUILDFILE"
+      - name: Configure Signing
+        run: |
+          # Create signing configuration file
+          cat << EOF > signing-config.gradle
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("../${{ env.KEYSTORE_PATH }}")
+                      storePassword "${{ env.KEYSTORE_PASSWORD }}"
+                      keyAlias "${{ env.KEY_ALIAS }}"
+                      keyPassword "${{ env.KEY_PASSWORD }}"
+                  }
+              }
+              
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                      minifyEnabled true
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+          }
+          EOF
           
-          sed -i 's/buildTypes {/buildTypes {\
-              release {\
-                  signingConfig signingConfigs.release\
-                  minifyEnabled true\
-                  proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"\
-              }/' "$BUILDFILE"
-        fi
+          # Find and update app's build.gradle
+          APP_GRADLE="app/build.gradle"
+          if [ -f "$APP_GRADLE" ]; then
+            echo "apply from: '../signing-config.gradle'" >> "$APP_GRADLE"
+          else
+            echo "Error: Could not find app/build.gradle"
+            exit 1
+          fi
 
-    - name: Build Debug APK
-      working-directory: ${{ steps.project-structure.outputs.primary_module }}
-      run: |
-        if [ -f "./gradlew" ]; then
-          ./gradlew assembleDebug
-        elif [ -f "../gradlew" ]; then
-          ../gradlew assembleDebug
-        else
-          gradle assembleDebug
-        fi
+      - name: Grant execution permission to Gradle Wrapper
+        run: chmod +x gradlew
 
-    - name: Build Release APK
-      working-directory: ${{ steps.project-structure.outputs.primary_module }}
-      run: |
-        if [ -f "./gradlew" ]; then
-          ./gradlew assembleRelease
-        elif [ -f "../gradlew" ]; then
-          ../gradlew assembleRelease
-        else
-          gradle assembleRelease
-        fi
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
 
-    - name: Find and Upload APKs
-      run: |
-        echo "Finding Debug APKs..."
-        DEBUG_APKS=$(find . -path "*/build/outputs/apk/debug/*.apk" ! -name "*-unsigned.apk")
-        
-        echo "Finding Release APKs..."
-        RELEASE_APKS=$(find . -path "*/build/outputs/apk/release/*.apk" ! -name "*-unsigned.apk")
-        
-        if [ -n "$DEBUG_APKS" ]; then
-          echo "Debug APKs found. Uploading..."
-          mkdir -p debug-apks
-          cp $DEBUG_APKS debug-apks/
-        else
-          echo "No debug APKs found"
-        fi
-        
-        if [ -n "$RELEASE_APKS" ]; then
-          echo "Release APKs found. Uploading..."
-          mkdir -p release-apks
-          cp $RELEASE_APKS release-apks/
-        else
-          echo "No release APKs found"
-        fi
+      - name: Locate APK Files
+        id: apk-location
+        run: |
+          APK_PATH=$(find . -type f -name "*.apk" -path "*/build/outputs/apk/release/*" -not -name "*unsigned*" | head -n 1)
+          echo "Found APK at: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
-    - name: Upload Debug APKs
-      uses: actions/upload-artifact@v3
-      with:
-        name: debug-apks
-        path: debug-apks/*.apk
+      - name: Generate APK Checksum
+        run: |
+          APK_PATH="${{ steps.apk-location.outputs.apk_path }}"
+          echo "Generating checksums for: $APK_PATH"
+          sha256sum "$APK_PATH" > "${APK_PATH}.sha256"
+          md5sum "$APK_PATH" > "${APK_PATH}.md5"
 
-    - name: Upload Release APKs
-      uses: actions/upload-artifact@v3
-      with:
-        name: release-apks
-        path: release-apks/*.apk
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.apk-location.outputs.apk_path }}
+            ${{ steps.apk-location.outputs.apk_path }}.sha256
+            ${{ steps.apk-location.outputs.apk_path }}.md5
+          draft: true
+          prerelease: false
+          generate_release_notes: true
 
-    - name: Collect Build Logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        name: build-logs
-        path: |
-          **/build/reports
-          **/build/outputs/logs
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Release APK
+          path: |
+            ${{ steps.apk-location.outputs.apk_path }}
+            ${{ steps.apk-location.outputs.apk_path }}.sha256
+            ${{ steps.apk-location.outputs.apk_path }}.md5
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            **/build/reports
+            **/build/outputs/logs
