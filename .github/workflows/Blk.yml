@@ -2,8 +2,8 @@ name: Rclone Transfer
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */7 * * *'  
+  #schedule:
+    #- cron: #'0 */7 * * *'  
 jobs:
   transfer:
     runs-on: ubuntu-latest
